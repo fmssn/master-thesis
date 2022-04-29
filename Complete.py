@@ -10,6 +10,7 @@ import statsmodels.formula.api as smf
 import numpy as np
 import warnings
 import copy
+import random
 
 from sklearn.model_selection import train_test_split, RepeatedKFold, KFold
 from sklearn.ensemble import RandomForestRegressor
@@ -19,9 +20,13 @@ from econml.dml import CausalForestDML
 from econml.dr import ForestDRLearner
 from causal_nets.utils import CoeffNet
 from abc import ABC, abstractmethod
+from sklearn.preprocessing import StandardScaler
+
 import time
 
 END_OF_X = 48
+START_OF_X = 2
+SEED = 42
 TREAT_NAME = "treat"
 Y_NAME = "buttonpresses"
 CONTROL_INDEX = 7
@@ -41,6 +46,15 @@ class Timer:
         seconds = int(round(time_passed % 60))
         print(f"It took {minutes} minutes and {seconds} seconds.")
         self.start = now
+        
+def printfull(df):
+    with pd.option_context("display.max_rows", None, "display.max_columns", None):
+        print(df)
+        
+def standardise(data):
+    scaler = StandardScaler()
+    scaler.fit(data)
+    return scaler.transform(data)
 
 
 def getXY(data, treatment=None):
@@ -60,7 +74,7 @@ def getXY(data, treatment=None):
     X, Y, (T): pd.Dataframe, pd.Series, pd Series
         Respective X, Y (and T) dataframes / vectors from inputed dataframe.
     """
-    X = data.iloc[:, 2:END_OF_X]
+    X = data.iloc[:, START_OF_X:END_OF_X]
     Y = data[Y_NAME]
     if treatment:
         index_t = data.columns.get_loc(treatment)
@@ -83,12 +97,21 @@ class HTEestimator(ABC):
     def predict():
         pass
 
-    def cross_validate(self, data, gridsearch_params, folds=3):
+    def cross_validate(self, data, gridsearch_params, folds=3, random_search=None):
         self.optimal_params = {
             treatment: dict(
                 params=None, score=10**10) for treatment in self.models.keys()}
         fold_iterator = KFold(folds)
         i = 0
+        if random_search:
+            if 0 < random_search < 1:
+                k = int(len(gridsearch_params) * random_search)
+            elif random_search >=1:
+                k = random_search
+            else:
+                raise ValueError("random_search has to be >0 but finite.")
+            gridsearch_params = random.sample(
+                    gridsearch_params, k)
         n = len(gridsearch_params)
         for treatment, __ in self.models.items():
             for params in gridsearch_params:
@@ -414,14 +437,20 @@ def t_risk(data_train, data_test, treatment, tau_pred):
     X_test, Y_test, T_test = getXY(data_test, treatment)
     X_train, Y_train, T_train = getXY(data_train, treatment)
     
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(X_train)
+    X_test = scaler.transform(X_test)
+    
     model_m = LassoCV(max_iter=1000)
     model_m.fit(X=X_train, y=Y_train)
+    
     model_p = LogisticRegressionCV(penalty='l1', max_iter=1000, solver='liblinear')
-    model_p.fit(X=X_test, y=T_test)
+    model_p.fit(X=X_train, y=T_test)
+    
     m = model_m.predict(X_test)
     p = model_p.predict(X_test)
     
-    score = sum ( ( Y_test - m ) - ( T_test - p ) * tau_pred )
+    score = sum ( np.square(( Y_test - m ) - ( T_test - p ) * tau_pred ))
     return score
 
 
@@ -467,7 +496,7 @@ class CausalForestHTE(HTEestimator):
                     | (data[TREAT_NAME] == int(key[-1]))
                 )
             ]
-            X, Y, T = getXY(data1, index_t=key)
+            X, Y, T = getXY(data1, key)
 
             model = CausalForest(n_estimators=1000, criterion="mse")
             with warnings.catch_warnings():  # For suppressing convergence fails
@@ -475,7 +504,6 @@ class CausalForestHTE(HTEestimator):
                 model.fit(X=X, T=T, y=Y)
 
             self.models[key] = model
-
         return self
     
 
@@ -532,9 +560,13 @@ class CausalForestDML6(HTEestimator):
                     | (data[TREAT_NAME] == int(key[-1]))
                 )
             ]
-            X, Y, T = getXY(data1, index_t=key)
+            X, Y, T = getXY(data1, key)
 
-            model = CausalForestDML(n_estimators=1000, random_state=RS, **params[key])
+            scaler = StandardScaler()            
+
+            model = CausalForestDML(
+                n_estimators=1000, random_state=RS, 
+                featurizer = scaler, **params[key])
             with warnings.catch_warnings():  # For suppressing convergence fails
                 warnings.simplefilter("ignore")
                 model.fit(X=X, T=T, Y=Y)
@@ -598,15 +630,39 @@ class DoubleRobustHTE(CausalForestDML6):
                     | (data[TREAT_NAME] == int(key[-1]))
                 )
             ]
-            X, Y, T = getXY(data1, index_t=key)
+            X, Y, T = getXY(data1, key)
+            X = standardise(X)
 
             model = ForestDRLearner(n_estimators=1000, random_state=RS, **params[key])
             with warnings.catch_warnings():  # For suppressing convergence fails
                 warnings.simplefilter("ignore")
-                model.fit(X=X, T=T, Y=Y)
+            model.fit(X=X, T=T, Y=Y)
 
             self.models[key] = model
         return self
+    
+    def predict(self, X):
+        """Predict HTE for all six treatments given X.
+
+
+        Parameters
+        ----------
+        X : pd.DataFrame
+            Contains the covariates in the same format as used for the training.
+
+        Returns
+        -------
+        pred_df : pd.DataFrame
+            Contains the predicted individual treatment effect for all treatments
+            (columns) for all observations of the inputed X dataframe(rows).
+
+        """
+        pred_df = pd.DataFrame()
+        X = standardise(X)
+        for treatment, model in self.models.items():
+            tau_pred = model.effect(X)
+            pred_df[treatment] = tau_pred.reshape(-1)
+        return pred_df
 
 
 class CausalNets(HTEestimator):
@@ -623,18 +679,18 @@ class CausalNets(HTEestimator):
         X_test, Y_test, T_test = getXY(data_test, treatment)
 
         model = CoeffNet(**params)
-        #with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        betas_model, history = model.training_NN(
-            training_data=[X_train, T_train, Y_train],
-            validation_data=[X_valid, T_valid, Y_valid],
-        )
-            
-        tau_pred, mu0pred = model.retrieve_coeffs(
-            betas_model=betas_model, input_value=X_test
-        )
-        tau_pred = np.concatenate(tau_pred)
-        print(min(history['val_loss']))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            betas_model, __ = model.training_NN(
+                training_data=[X_train, T_train, Y_train],
+                validation_data=[X_valid, T_valid, Y_valid],
+            )
+
+        for treatment, net in self.models.items():
+            tau_pred, mu0pred = model.retrieve_coeffs(
+                betas_model=betas_model, input_value=X_test
+            )
+            tau_pred = np.concatenate(tau_pred)
         return tau_pred
 
     def fit(self, data, params={}):
@@ -662,7 +718,7 @@ class CausalNets(HTEestimator):
                 "learning_rate": 0.0009,
                 "max_epochs_without_change": 30,
                 "max_nepochs": 10000,
-                "seed": None,
+                "seed": RS,
                 "verbose": False,
             }
 
@@ -675,8 +731,8 @@ class CausalNets(HTEestimator):
 
             data1_test = getTreatmentSnippet(data_test, treatment)
             X_valid, Y_valid, T_valid = getXY(data1_test, treatment)
-
-            model = CoeffNet(**params)
+            
+            model = CoeffNet(**params[treatment])
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 betas_model, __ = model.training_NN(
@@ -709,147 +765,6 @@ class CausalNets(HTEestimator):
             )
             pred_df[treatment] = np.concatenate(tau_pred)
         return pred_df
-
-
-
-class ShrinkageEstimators:
-    def __init__(self, data):
-        self.data = data
-        self.getATEvar()
-        self.getTauVars()
-        self.ate = data[data["treat"].isin(range(1, 7))].buttonpresses.sum()
-
-    def shrinkJamesStein(self, preds, towards_overall_mean=False):
-        """Shrink predictions in line with James Stein estimator.
-
-        Parameters
-        ----------
-        preds : pd.Series
-            The predictions for the individual treatment effects
-
-        towards_overall_mean : bool, optional
-            Whether to shrink towards the overall average treatment effect of
-            all treatments (or towards the mean of the respective treatment if
-            False). The default is False.
-
-        Returns
-        -------
-        preds_altered : pd.Series
-            Shrunk predictions for individual treatment effects.
-        c : float
-            Shrinking factor.
-        """
-        n = len(preds)
-        c = 1 - (n - 3) * self.var_ate / \
-            (np.square(preds - preds.mean()).sum())
-        if towards_overall_mean:
-            preds_altered = (preds - self.ate) * c + self.ate
-        else:
-            preds_altered = (preds - preds.mean()) * c + preds.mean()
-        return preds_altered, c
-
-    def shrinkBiasAdjustment(self, preds, towards_overall_mean=False):
-        """Shrink predictions according the Chen/Zimmermann shrinkage estimator.
-
-        Parameters
-        ----------
-        preds : pd.Series
-            The predictions for the individual treatment effects
-
-        Returns
-        -------
-        preds_alt: pd.Series
-            Shrunk predictions for individual treatment effects.
-        c : float
-            Shrinking factor
-        """
-        c = self.var_ate / (self.var_ate + self.tau_vars)
-        if towards_overall_mean:
-            preds_alt = c * preds + (1 - c) * self.ate
-        else:
-            preds_alt = c * preds + (1 - c) * preds.mean()
-        return preds_alt, c
-
-    def getTauVars(self):
-        """Get the variance of all 6 treatments.
-
-        Measured by the respective variance of the OLS estimator in a regression
-        Y ~ beta_0 + beta_1 * Treated(J)_i, where Treated(J)_i is 1 if the
-        individual is treated with treatment J and 0 if not (control). The
-        regression is performed on a cutout dataset only including control and
-        observations with treatment J, respectively.
-        """
-        data = self.data
-        tau_vars = []
-        for t in range(1, 7):
-            treatment = "treat_" + str(t)
-            data_snippet = data[(data["treat"] == t) | (data["treat"] == 7)]
-            model = smf.ols(
-                "buttonpresses ~ {}".format(treatment), data=data_snippet
-            ).fit()
-            tau_vars.append(model.bse[1] ** 2)
-        self.tau_vars = tau_vars
-        return self
-
-    def getATEvar(self):
-        """Performs a OLS regression to retrieve variance of the ATE.
-
-        The regression is Y ~ beta_0 + beta_1 * Treated_i + e, where Treated_i
-        is 1 if the individual is treated at all by any treatment and 0 if not.
-        """
-        T = self.data["treat"] != CONTROL_INDEX
-        T = T.astype("int")
-        data = pd.DataFrame({"Y": self.data["buttonpresses"], "treat": T})
-        data.Y = pd.to_numeric(data.Y, errors="coerce")
-        data.treat = pd.to_numeric(data.treat, errors="coerce")
-        model = smf.ols("Y ~ T", data=data).fit()
-        self.var_ate = model.bse["T"] ** 2
-        return self
-
-    def shrink(self, tau_preds, prefix="shrunk"):
-        """Shrink predictions with all four shrinkage methods.
-
-        Parameters
-        ----------
-        tau_preds : pd.DataFrame
-            containts
-        prefix : TYPE, optional
-            DESCRIPTION. The default is 'shrunk'.
-
-        Returns
-        -------
-        df_summary : pd.DataFrame
-            Contains Misra-Matched treatment assignments. Columns are treatment
-            + overall, rows are Y values and number of matched Ys.
-        """
-
-        tau_alt, __ = self.shrinkJamesStein(tau_preds)
-        df_matched_alt = MisraMatching.getMatchingPredictions(
-            self.data, tau_alt, prefix + "_JS_individ"
-        )
-
-        tau_alt2, __ = self.shrinkJamesStein(
-            tau_preds, towards_overall_mean=True)
-        df_matched_alt2 = MisraMatching.getMatchingPredictions(
-            self.data, tau_alt2, prefix + "_JS_pool"
-        )
-
-        predsBAdj, __ = self.shrinkBiasAdjustment(tau_preds)
-        df_matched_BAdj = MisraMatching.getMatchingPredictions(
-            self.data, predsBAdj, prefix + "_BAdj_individ"
-        )
-
-        predsBAdj2, __ = self.shrinkBiasAdjustment(
-            tau_preds, towards_overall_mean=True)
-        df_matched_BAdj2 = MisraMatching.getMatchingPredictions(
-            self.data, predsBAdj2, prefix + "_BAdj_pool"
-        )
-
-        df_summary = pd.concat(
-            [df_matched_alt, df_matched_alt2, df_matched_BAdj, df_matched_BAdj2]
-        )
-
-        return df_summary
 
 
 class MisraMatching:
@@ -901,7 +816,7 @@ class MisraMatching:
             model.fit(data_train, params=self.params_allmodels[model.__name__])
         else:
             model = model.fit(data_train)
-        tau_pred = model.predict(data_test.iloc[:, 2:END_OF_X])
+        tau_pred = model.predict(data_test.iloc[:, START_OF_X:END_OF_X])
         summary_stats_df = MisraMatching.getMatchingPredictions(
             data_test, tau_pred, model.__name__
         )
@@ -1179,11 +1094,145 @@ class MisraMatching:
             columns=list(used_treatments) + ["overall"],
         )
         return summary_df
+    
+class ShrinkageEstimators:
+    def __init__(self, data):
+        self.data = data
+        self.getATEvar()
+        self.getTauVars()
+        self.ate = data[data["treat"].isin(range(1, 7))].buttonpresses.sum()
 
+    def shrinkJamesStein(self, preds, towards_overall_mean=False):
+        """Shrink predictions in line with James Stein estimator.
 
-def printfull(df):
-    with pd.option_context("display.max_rows", None, "display.max_columns", None):
-        print(df)
+        Parameters
+        ----------
+        preds : pd.Series
+            The predictions for the individual treatment effects
+
+        towards_overall_mean : bool, optional
+            Whether to shrink towards the overall average treatment effect of
+            all treatments (or towards the mean of the respective treatment if
+            False). The default is False.
+
+        Returns
+        -------
+        preds_altered : pd.Series
+            Shrunk predictions for individual treatment effects.
+        c : float
+            Shrinking factor.
+        """
+        n = len(preds)
+        c = 1 - (n - 3) * self.var_ate / \
+            (np.square(preds - preds.mean()).sum())
+        if towards_overall_mean:
+            preds_altered = (preds - self.ate) * c + self.ate
+        else:
+            preds_altered = (preds - preds.mean()) * c + preds.mean()
+        return preds_altered, c
+
+    def shrinkBiasAdjustment(self, preds, towards_overall_mean=False):
+        """Shrink predictions according the Chen/Zimmermann shrinkage estimator.
+
+        Parameters
+        ----------
+        preds : pd.Series
+            The predictions for the individual treatment effects
+
+        Returns
+        -------
+        preds_alt: pd.Series
+            Shrunk predictions for individual treatment effects.
+        c : float
+            Shrinking factor
+        """
+        c = self.var_ate / (self.var_ate + self.tau_vars)
+        if towards_overall_mean:
+            preds_alt = c * preds + (1 - c) * self.ate
+        else:
+            preds_alt = c * preds + (1 - c) * preds.mean()
+        return preds_alt, c
+
+    def getTauVars(self):
+        """Get the variance of all 6 treatments.
+
+        Measured by the respective variance of the OLS estimator in a regression
+        Y ~ beta_0 + beta_1 * Treated(J)_i, where Treated(J)_i is 1 if the
+        individual is treated with treatment J and 0 if not (control). The
+        regression is performed on a cutout dataset only including control and
+        observations with treatment J, respectively.
+        """
+        data = self.data
+        tau_vars = []
+        for t in range(1, 7):
+            treatment = "treat_" + str(t)
+            data_snippet = data[(data["treat"] == t) | (data["treat"] == 7)]
+            model = smf.ols(
+                "buttonpresses ~ {}".format(treatment), data=data_snippet
+            ).fit()
+            tau_vars.append(model.bse[1] ** 2)
+        self.tau_vars = tau_vars
+        return self
+
+    def getATEvar(self):
+        """Performs a OLS regression to retrieve variance of the ATE.
+
+        The regression is Y ~ beta_0 + beta_1 * Treated_i + e, where Treated_i
+        is 1 if the individual is treated at all by any treatment and 0 if not.
+        """
+        T = self.data["treat"] != CONTROL_INDEX
+        T = T.astype("int")
+        data = pd.DataFrame({"Y": self.data["buttonpresses"], "treat": T})
+        data.Y = pd.to_numeric(data.Y, errors="coerce")
+        data.treat = pd.to_numeric(data.treat, errors="coerce")
+        model = smf.ols("Y ~ T", data=data).fit()
+        self.var_ate = model.bse["T"] ** 2
+        return self
+
+    def shrink(self, tau_preds, prefix="shrunk"):
+        """Shrink predictions with all four shrinkage methods.
+
+        Parameters
+        ----------
+        tau_preds : pd.DataFrame
+            containts
+        prefix : TYPE, optional
+            DESCRIPTION. The default is 'shrunk'.
+
+        Returns
+        -------
+        df_summary : pd.DataFrame
+            Contains Misra-Matched treatment assignments. Columns are treatment
+            + overall, rows are Y values and number of matched Ys.
+        """
+
+        tau_alt, __ = self.shrinkJamesStein(tau_preds)
+        df_matched_alt = MisraMatching.getMatchingPredictions(
+            self.data, tau_alt, prefix + "_JS_individ"
+        )
+
+        tau_alt2, __ = self.shrinkJamesStein(
+            tau_preds, towards_overall_mean=True)
+        df_matched_alt2 = MisraMatching.getMatchingPredictions(
+            self.data, tau_alt2, prefix + "_JS_pool"
+        )
+
+        predsBAdj, __ = self.shrinkBiasAdjustment(tau_preds)
+        df_matched_BAdj = MisraMatching.getMatchingPredictions(
+            self.data, predsBAdj, prefix + "_BAdj_individ"
+        )
+
+        predsBAdj2, __ = self.shrinkBiasAdjustment(
+            tau_preds, towards_overall_mean=True)
+        df_matched_BAdj2 = MisraMatching.getMatchingPredictions(
+            self.data, predsBAdj2, prefix + "_BAdj_pool"
+        )
+
+        df_summary = pd.concat(
+            [df_matched_alt, df_matched_alt2, df_matched_BAdj, df_matched_BAdj2]
+        )
+
+        return df_summary
 
 
 if __name__ == "__main__":
