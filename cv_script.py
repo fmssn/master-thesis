@@ -6,7 +6,7 @@ Created on Wed Feb 23 16:00:39 2022
 """
 import pandas as pd 
 import json
-from Complete import *
+from mlmethods import *
 
 possible_treatments = ["treat_" + str(i) for i in range(1, 7)]
 df = pd.read_csv(
