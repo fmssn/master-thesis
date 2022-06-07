@@ -880,7 +880,7 @@ class CausalNets(HTEestimator):
             data1_test = getTreatmentSnippet(data_test, treatment)
             X_valid, Y_valid, T_valid = getXY(data1_test, treatment)
             
-            model = CoeffNet(**params[treatment])
+            model = CoeffNet(**params[treatment]["params"])
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 betas_model, history = model.training_NN(
@@ -1073,7 +1073,9 @@ class MisraMatching:
         )
         for train, test in fold_iterator.split(data):
             data_train = data.iloc[train].reset_index(drop=True)
-            data_test = data.iloc[test].reset_index(drop=True)
+            data_test = data_train.copy()
+            test = train
+            # data_test = data.iloc[test].reset_index(drop=True)
 
             Shrinker = ShrinkageEstimators(data_test)
 
