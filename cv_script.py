@@ -10,12 +10,12 @@ from mlmethods import *
 
 possible_treatments = ["treat_" + str(i) for i in range(1, 7)]
 df = pd.read_csv(
-    r"C:\Users\fabia\Documents\Masterarbeit\Masterarbeit\temp\csv\expdata.csv")
+    r"C:\Users\Fabian\Documents\Master Thesis Git\expdata.csv")
 
 
 def save_params(name:str, params:dict):
     filename =\
-        'C:/Users/fabia/Documents/Masterarbeit/Masterarbeit/CV/'+ name + '.txt'
+        'C:/Users/Fabian/Documents/Params/'+ name + '.txt'
     with open(filename, 'w') as file:
         file.write(json.dumps(params))
 
