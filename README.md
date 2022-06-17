@@ -9,10 +9,10 @@ Contains the CV_Results (see mlmethods) saved from the hundred times performed t
 Contains the CV_Results (see mlmethods) saved from the hundred times performed three-folded cross validation Misra-Matching for all three ML-Methods + combinations with all shrinkage methods. All treatments were considered. Matching is only done on the test set to get the counterpart of the training error.
 
 ### `plots.py`
-Code for creating plots used in the Analytics.ipynb
+Code for creating plots used in the Analytics.ipynb.
 
 ### `mlmethods.py`
-Main script with all ML-Method classes and the code for Misra-Matching. Is only used for importing, empty `main()`
+Main script with all ML-Method classes and the code for Misra-Matching. Is only used for importing, empty `main()`.
 
 ### `expdata.csv`
 Raw data of the experiment.
@@ -24,6 +24,6 @@ Script for hyper-parameter tuning of the ML-Methods.
 Jupyter notebook for creating descriptional statistics, result tables and figures.
 
 ### `misramatching_script.py`
-Performs the Misra-Matching with the three ML methods and if wished with applied shrinkers. Adjust the `used_treatments` list for the subset of treatments.
+Performs the Misra-Matching with the three ML methods and if wished with applied shrinkers. Adjust the `used_treatments` list for the subset of treatments. Here also the dictionary for the used hyperparameters can be found.
 
 Please note that the paths in the python scripts have to be adjusted to your working directory! 
