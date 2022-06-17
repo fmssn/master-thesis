@@ -24,4 +24,6 @@ Script for hyper-parameter tuning of the ML-Methods.
 Jupyter notebook for creating descriptional statistics, result tables and figures.
 
 ### `misramatching_script.py`
-Performs the Misra-Matching with 
+Performs the Misra-Matching with the three ML methods and if wished with applied shrinkers. Adjust the `used_treatments` list for the subset of treatments.
+
+Please note that the paths in the python scripts have to be adjusted to your working directory! 
